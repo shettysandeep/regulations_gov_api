@@ -11,13 +11,13 @@ Code to extract comments (and  attachments)  from Regulations.gov API
 from datetime import datetime
 import json, os
 import requests
-import ast
+import ast, time
 import pandas as pd
 
 class RegCommentAPI:
     """Extract Comments on Docket from Regulation.gov"""
 
-    def __init__(self, api_file, page_size = 25):
+    def __init__(self, api_file, page_size = 250):
         self._url = ''               # Base url with the endpoint for Dockets
         self._docnum = ''            # Docket ID, e.g. CMS-2011-0142
         self._api = ''               # If you want to supply the API directly
@@ -54,6 +54,7 @@ class RegCommentAPI:
         self._comment_url = comment_endpoint
 
     def collect_api(self):
+        """Collect the API provided directly or via a file (without extension)"""
         if self._api:
             return self._api
         else:
@@ -61,7 +62,15 @@ class RegCommentAPI:
                 api=f.read()
             return api
 
+    def get_rate_limit(self, url):
+        """Get starting X-Rate-Limit"""
+        print(url)
+        content = requests.get(url) #, rate_limit)
+        rate_limit=content.headers['X-RateLimit-Remaining']
+        return rate_limit
+
     def docket_url_maker(self, page_num=1):
+        """Create a query-tailored complete API URL"""
         api = self.collect_api()
         url_name = self._url+self._docnum+\
                    '&page[number]='+str(page_num)+\
@@ -69,27 +78,34 @@ class RegCommentAPI:
                    '&api_key='+api
         return str(url_name)
 
-    def make_request(self, url):
+    def make_request(self, url, rate_limit):
         '''API request, collect results'''
-        request_data = requests.get(url)
-        return request_data
+        if (int(rate_limit)-2) != 0:
+            request_data = requests.get(url)
+            rate_limit = request_data.headers['X-RateLimit-Remaining'] #self.get_rate_limit(url)
+            print(f"make_request {rate_limit}")
+        else:
+            print("Come back in an hour. Time is {}".format(time.ctime()))
+            seconds_wait = 60*60 # datetime objects resulting
+            time.sleep(seconds_wait)
+            rate_limit = self.get_rate_limit(url)
+            request_data = self.make_request(self, url, rate_limit)
+        return request_data, rate_limit
 
-    def execute_request(self, url):
+    def execute_request(self, url, rate_limit):
         """Extract all comments"""
-        content = self.make_request(url1)
+        content, rl = self.make_request(url1, rate_limit)
+        rate_limit = rl
         data = content.json()
-
         # Collect document meta information
         total_pages = data['meta']['totalPages']
         total_count = data['meta']['totalElements']
         comment_data = pd.DataFrame(data['data'])
-
         # More than one page of comments
         if data['meta']['hasNextPage']:
             for i in range(1,total_pages):
                 url_update=self.docket_url_maker(page_num=i+1)
-                self.make_request(url_update)
-                content=self.make_request(url_update)
+                content, rate_limit =self.make_request(url_update, rate_limit)
                 data=content.json()
                 # Append the comments meta in a dataframe
                 comment_data = pd.concat([comment_data,
@@ -97,21 +113,24 @@ class RegCommentAPI:
         comment_data.reset_index(inplace=True, drop=True)
         print("Number of comments in Docket {}: {}".format(self._docnum,
                                                            total_count))
-        return comment_data
+        return comment_data, rate_limit
 
-    def extract_each_comment(self, url):
+    def extract_each_comment(self, url, rate_limit):
         """
         Retrieve comment using the comment url.
         Arguments: comment url (endpoint)
-
+        E.g: https://api.regulations.gov/v4/comments/CMS-2011-0142-0061
         """
         api_key = self.collect_api()
         # Add API key to the url
         comment_url=url+'?include=attachments&api_key='+api_key
-        comment_request=self.make_request(comment_url)
+        comment_request, rl =self.make_request(comment_url, rate_limit)
+        rate_limit = rl
+        print("each_comment {}".format(rl))
         comment_json = comment_request.json()
         comment_data = comment_json['data']
         comment_text_meta=comment_data['attributes']
+        # If a comment has attachments
         if 'included' in comment_json:
             attachs=comment_json['included']
             att_links=[]
@@ -123,19 +142,16 @@ class RegCommentAPI:
             comment_attach_link = ''
         return comment_text_meta, comment_attach_link
 
-    def comment_attach_data(self, pd_data):
+    def comment_attach_data(self, pd_data, rate_limit):
         """
         Iterates through each comment link to download the text and the
-        comment meta data.
-
-        Returns an Pandas DataFrame
-
+        comment meta data. Returns a Pandas DataFrame
         """
         for ind in pd_data.index:
             obtain_link = pd_data.loc[ind,'links']
             extract_link = obtain_link['self']
             # print(extract_link)
-            cmnt_info, cmnt_attach_link=self.extract_each_comment(extract_link)
+            cmnt_info, cmnt_attach_link=self.extract_each_comment(extract_link, rate_limit)
             pd_data.loc[ind, "comment_text"] = cmnt_info["comment"]
             pd_data.loc[ind, "attach_link"] = str(cmnt_attach_link)
         return pd_data
@@ -150,7 +166,7 @@ class RegCommentAPI:
         dat2 = pd.json_normalize(pd_data[cols])
         pd_data = pd_data.merge(dat2, left_index=True,
                                       right_index=True)
-
+        pd_data.drop(columns=cols, inplace=True)
         return pd_data
 
     def download_attach(self, url):
@@ -166,31 +182,43 @@ class RegCommentAPI:
 if __name__=="__main__":
 
     docket_url = r'https://api.regulations.gov/v4/comments?filter[docketId]='
+    # docket_url_gt_5000 = r'https://api.regulations.gov/v4/documents?filter[docketId]='
 
-    doc1=RegCommentAPI(api_file='Reg_API_AIR')
+    doc1=RegCommentAPI(api_file='../Reg_API_IMPAQ')
     doc1.url=docket_url
-    doc1.docnum='CMS-2011-0142'
+    # doc1.docnum='CMS-2011-0142'
+    doc1.docnum = 'HHS-OCR-2015-0006'
 
     print(doc1.docnum)
+    #API request format URL
     url1 = doc1.docket_url_maker()
+    print(url1)
+    # Starting API request limit
+    rt_lt = doc1.get_rate_limit(url1)
+    print("Starting API rate limit {}".format(rt_lt))
 
-    comment_data = doc1.execute_request(url1)
+    # Request and Collect JSON file of comments
+    comment_data, rl = doc1.execute_request(url1, rate_limit=rt_lt)
 
-    comment_data = doc1.comment_attach_data(comment_data)
+    # Clean up and convert to Pandas DataFrame
+    comment_data = doc1.comment_attach_data(comment_data, rate_limit = rl)
     print(comment_data.shape)
 
     # Unpack column with JSON objects as values
     comment_data_rev = doc1.json_normal(comment_data, cols='attributes')
-    comment_data_rev.drop(columns=['attributes'], inplace=True)
 
     # Save the Comment Data with the Docket name
     date_1 = datetime.now().strftime("%Y_%m_%d-%I%M%p")
     comment_data_rev.to_csv("{}_{}.csv".format(doc1.docnum, date_1))
 
-    # Download attachments
+    # Download All Attachments
+    # ~~~~
+    ## Create and change directory
     save_dir = doc1.docnum+'_attachments'
     os.mkdir(save_dir)
     os.chdir(save_dir)
+
+    ## Cycle through the Download links to fetch the files
     for ind in comment_data_rev.index:
         list_attach=comment_data_rev.loc[ind,"attach_link"]
         if list_attach != "":
@@ -199,3 +227,4 @@ if __name__=="__main__":
                 print(item)
                 doc1.download_attach(item)
                 print("download {} complete".format(item))
+    # ~~~

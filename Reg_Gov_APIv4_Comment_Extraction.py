@@ -94,7 +94,7 @@ class RegCommentAPI:
 
     def execute_request(self, url, rate_limit):
         """Extract all comments"""
-        content, rl = self.make_request(url1, rate_limit)
+        content, rl = self.make_request(url, rate_limit)
         rate_limit = rl
         data = content.json()
         # Collect document meta information
